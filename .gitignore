@@ -2,3 +2,4 @@
 .ionide/
 packages/
 paket-files/
+.idea/
