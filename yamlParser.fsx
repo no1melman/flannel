@@ -63,7 +63,12 @@ let parseObject : Parser<Yaml, YamlState> =
       printfn "atempting key value, %c" (stream.Peek())
       Reply(())
     ) >>.
-    keyValueParser .>>. (consumeNewLine >>. yamlObject) |>> (function
+    keyValueParser .>>. (
+      (fun stream ->
+        printfn "attepting key value consume new line, %c" (stream.Peek())
+        Reply(())
+      ) >>.
+      consumeNewLine >>. yamlObject) |>> (function
       | a, YObject innerobj -> [a] |> Map.ofList |> join innerobj |> YObject
       | _ -> YObject Map.empty
     )
@@ -72,7 +77,12 @@ let parseObject : Parser<Yaml, YamlState> =
       printfn "attempting key, %c" (stream.Peek())
       Reply(())
     ) >>.
-    keyParser .>>. (consumeNewLine >>. consumeIndentation >>. yamlObject) |>> (function pair -> YObject (Map.ofList [pair]))
+    keyParser .>>. (  
+      (fun stream ->
+        printfn "attepting key consume new line, %c" (stream.Peek())
+        Reply(())
+      ) >>.
+      consumeNewLine >>. consumeIndentation >>. yamlObject) |>> (function pair -> YObject (Map.ofList [pair]))
   (fun stream -> 
     printfn "diving in, %c" (stream.Peek())
     Reply(())
