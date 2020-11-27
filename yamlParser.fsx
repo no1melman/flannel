@@ -58,20 +58,18 @@ let consumeIndentation : Parser<unit, YamlState> =
 let yamlObject, yamlObjectRef = createParserForwardedToRef()
 
 let parseObject : Parser<Yaml, YamlState> =
-  let attemptKeyValue = 
+  let tryNextPropertyOrObject =
+    (attempt (consumeNewLine >>. yamlObject)) <|> (eof >>% (Map.empty |> YObject))
+  let attemptKeyValue =
     (fun stream -> 
-      printfn "atempting key value, %c" (stream.Peek())
+      printfn "attempting key value, %c" (stream.Peek())
       Reply(())
-    ) >>.
-    keyValueParser .>>. (
-      (fun stream ->
-        printfn "attepting key value consume new line, %c" (stream.Peek())
-        Reply(())
-      ) >>.
-      consumeNewLine >>. yamlObject) |>> (function
+    ) >>. keyValueParser .>>. ((fun stream ->
+      printfn "attempting key value consume new line, %c" (stream.Peek())
+      Reply(())
+    ) >>. tryNextPropertyOrObject) |>> (function
       | a, YObject innerobj -> [a] |> Map.ofList |> join innerobj |> YObject
-      | _ -> YObject Map.empty
-    )
+      | _ -> YObject Map.empty)
   let attemptKey =
     (fun stream ->
       printfn "attempting key, %c" (stream.Peek())
@@ -79,14 +77,15 @@ let parseObject : Parser<Yaml, YamlState> =
     ) >>.
     keyParser .>>. (  
       (fun stream ->
-        printfn "attepting key consume new line, %c" (stream.Peek())
+        printfn "attempting key consume new line, %c" (stream.Peek())
         Reply(())
       ) >>.
-      consumeNewLine >>. consumeIndentation >>. yamlObject) |>> (function pair -> YObject (Map.ofList [pair]))
+      consumeNewLine >>. consumeIndentation >>. yamlObject
+    ) |>> (function pair -> YObject (Map.ofList [pair]))
   (fun stream -> 
     printfn "diving in, %c" (stream.Peek())
     Reply(())
-  ) >>. (attemptKeyValue <|> attemptKey)
+  ) >>. ((attempt attemptKeyValue) <|> attemptKey)
 
 do yamlObjectRef := parseObject
 
