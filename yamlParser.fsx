@@ -26,7 +26,7 @@ let stringParser = many1Satisfy (fun c -> (int c) >= 65 && (int c) <= 122)
 
 let consumeSpaces = manySatisfy (fun c -> c = ' ')
 
-let consumeEndOfLine = consumeSpaces .>> (attempt newline <|> (preturn 'a'))
+let consumeEndOfLine = consumeSpaces .>> (attempt newline <|> attempt (eof >>% 'a') <|> (preturn 'a'))
 
 let keyParser = stringParser .>> pchar ':' .>> consumeSpaces |>> string
 let valueParser = stringParser .>> consumeEndOfLine |>> YValue 
@@ -107,34 +107,60 @@ let yamlObject, yamlObjectRef = createParserForwardedToRef()
 
 let parseObject : Parser<Yaml, YamlState> =
   let attemptKeyValue =
-    keyValueParser .>>. yamlObject |>> (fun (kv, y) ->
-      printfn "Found :: %A" y
-      printfn "Adding :: %A" kv
-      match kv, y with
-      | a, YObject innerobj -> [a] |> Map.ofList |> join innerobj |> YObject
-      | _ -> YObject Map.empty)
+    ( fun stream ->
+        let rpl = keyValueParser stream
+        printfn "Attemping key value"
+        rpl
+    ) |>> (fun a -> [a] |> Map.ofList |> YObject)
   let attemptKey =
-    keyParser .>>. (consumeEndOfLine >>. increaseIndentation >>. yamlObject) |>> (function pair -> YObject (Map.ofList [pair]))
+    keyParser .>>. ((fun stream ->
+      printfn "consuming eol"
+      let rpl = consumeEndOfLine stream
+      printfn "consumed eol"
+      rpl
+    ) >>. increaseIndentation >>. (fun stream ->
+      printfn "Going down :: %i" stream.UserState.CurrentIndentation
+      let rpl = yamlObject stream
+      rpl
+    )) |>> (function pair -> YObject (Map.ofList [pair]))
   let tryKeyValueThenKey = (attempt attemptKeyValue) <|> attemptKey 
   // what is happening is it is trying to do the attemptKeyValue and failing - obviously falling out the 
   // recursion, so need to figure out what to do about attempting objects - seems like consumeIndent may not be detecting or something
-  stopObjectCollectionOrContinue consumeIndentation tryKeyValueThenKey
+  stopObjectCollectionOrContinue consumeIndentation (fun stream ->
+    let rpl = many tryKeyValueThenKey |>> (fun yobjs ->
+        List.fold (fun yreturn yobj ->
+          match yobj, yreturn with
+          | YObject o, YObject o2 -> YObject (join o o2)
+          | _ -> YObject (Map.empty)
+        ) emptyYObject yobjs
+      )
+    printfn "Done trying... exiting parseObject"
+    rpl stream
+  )
 
 let wrapParseObject : Parser<Yaml, YamlState> = 
-  attempt (many parseObject |>> (fun yobjs -> 
-    List.fold (fun yreturn yobj -> 
-      match yobj, yreturn with
-      | YObject o, YObject o2 -> YObject (join o o2)
-      | _ -> YObject (Map.empty)
-    ) emptyYObject yobjs
+  attempt (many (fun stream ->
+    printfn "running base parser :: %c" (stream.Peek())
+    let rtn =  yamlObject stream
+    rtn
+  ) |>> (fun yobjs -> 
+    let rtn =
+      List.fold (fun yreturn yobj ->
+        printfn "got here with %A\n%A" yreturn yobj 
+        match yobj, yreturn with
+        | YObject o, YObject o2 -> YObject (join o o2)
+        | _ -> YObject (Map.empty)
+      ) emptyYObject yobjs
+    printfn "whatup ===== " |> ignore
+    rtn
   )) .>> eof
 
-do yamlObjectRef := wrapParseObject
+do yamlObjectRef := parseObject
 
-let file = yamlObject .>> eof
+let file = wrapParseObject .>> eof
 
 let runYaml p s = runParserOnString p YamlState.Default "" s
 
-runYaml file "a: \n  b: c \n  d:e\nf:g" |> printfn "%A"
+runYaml file "a: \n  b: c \n  d:e\nf: \n  g: \n    h: i\n    j:   k\n  l:m\nn: o" |> printfn "%A"
 
 // runYaml ((keyValueParser |>> (fun a -> [a] |> Map.ofList |> YObject) ) <|> (keyParser |>> (fun a -> [a,YObject (Map.empty)] |> Map.ofList |> YObject))) "a: " |> printfn "%A"
