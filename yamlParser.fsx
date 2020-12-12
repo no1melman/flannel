@@ -3,6 +3,7 @@
 
 open FParsec
 open System
+open System.Text
 
 type Yaml =
   | YValue of string
@@ -12,39 +13,16 @@ type Yaml =
 type YamlState = {
     CurrentIndentation: int
     PreviousIndentation: int
-    RewindingObject: bool
   }
   with
     static member Default = { 
-      CurrentIndentation = 0; 
-      PreviousIndentation = 0; 
-      RewindingObject = false }
+      CurrentIndentation = 0 
+      PreviousIndentation = 0 
+    }
 
-let ws = spaces
-
-let mapFromPair a = [a] |> Map.ofList
-let toString (a: char array) = String ( a )
-let repeatChar a no = String ( a, no )
+let mapFromPair a = Map.ofList [a]
 let join (p:Map<'a,'b>) (q:Map<'a,'b>) = 
   Map(Seq.concat [ (Map.toSeq p) ; (Map.toSeq q) ])
-let emptyYObject = YObject Map.empty
-let createEmptyYamlObject () = YObject Map.empty
-
-let stringParser = many1Satisfy (fun c -> (int c) >= 65 && (int c) <= 122)
-let consumeSpaces = manySatisfy (fun c -> c = ' ')
-let consumeEndOfLine = consumeSpaces .>> (attempt newline <|> attempt (eof >>% 'a') <|> (preturn 'a'))
-
-let changeIndentation f : Parser<unit, YamlState> =
-  fun stream ->
-    stream.UserState <- { 
-        CurrentIndentation = (f stream.UserState); 
-        PreviousIndentation = stream.UserState.CurrentIndentation;
-        RewindingObject = stream.UserState.RewindingObject
-      }
-    Reply(())
-let increaseIndentation : Parser<unit, YamlState> = changeIndentation (fun state -> state.CurrentIndentation + 2)
-let decreaseIndentation : Parser<unit, YamlState> = changeIndentation (fun state -> state.CurrentIndentation - 2)
-
 let consumeIndentationHelper peeker reader =
   let mutable continueLooping = true
   let mutable readLength = 0
@@ -57,118 +35,72 @@ let consumeIndentationHelper peeker reader =
       readLength <- readLength + 1
   readLength
 
-type TriState =
-  | TooMany
-  | NotEnough
-  | Correct
-
-let getIndentationState currentIndentation readLength =
-  if readLength = currentIndentation then Correct
-  elif readLength < currentIndentation then NotEnough
-  else TooMany
-
-let consumeIndentation : Parser<unit, YamlState> = 
+let stringParser = many1Satisfy (fun c -> (int c) >= 65 && (int c) <= 122)
+let spaceConsumer = manySatisfy (fun c -> c = ' ')
+let consumeIndentation : Parser<_,YamlState>=
   fun stream ->
-    let { CurrentIndentation = currentIndentation } = stream.UserState
-    let readLength = consumeIndentationHelper stream.Peek stream.Read 
-    let indentationState = getIndentationState currentIndentation readLength
-    printfn "%A :: %i" indentationState currentIndentation
-    match indentationState with
-      //  this is when the indentation is less than what we expect, not a fatal, just need to start unwiding
-    | NotEnough -> 
-        stream.Skip(-readLength) |> ignore
-        Reply(Error, messageError "Soft error")
-    | TooMany -> 
-        stream.Skip(-readLength) |> ignore
-        let msg = sprintf "Incorrect Indentation, expected %i spaces, got %i" currentIndentation readLength
-        Reply(FatalError, messageError msg)
-    | Correct -> Reply(())
-
-let yamlObject, yamlObjectRef = createParserForwardedToRef()
-let valueParser = stringParser .>> consumeEndOfLine |>> YValue
-let keyParser = stringParser .>> pchar ':' .>> consumeSpaces |>> string
-let keyValueParser = keyParser .>>. valueParser |>> (mapFromPair >> YObject)
-let keyObjectParser = 
-  keyParser .>>. (consumeEndOfLine >>. increaseIndentation >>. many ((fun stream ->
-    let { CurrentIndentation = currentIndentation } = stream.UserState
-
+    let stateTag = stream.StateTag
+    let { CurrentIndentation = currentInd } = stream.UserState
     let readLength = consumeIndentationHelper stream.Peek stream.Read
-    let indentationState = getIndentationState currentIndentation readLength
-    
-    match indentationState with
-    | TooMany ->
-      stream.Skip(-readLength) |> ignore
-      Reply(FatalError, messageError "Too much")
-    | NotEnough ->
-      stream.Skip(-readLength) |> ignore
-      Reply(Error, messageError "Soft Error")
-    | Correct -> Reply(())
-  ) >>. keyValueParser)) |>> (fun (k, yobjs) ->
-     let inner = yobjs |> List.fold (fun finalState yobj ->
-                    match finalState, yobj with
-                    | YObject b, YObject c -> YObject (join b c)
-                    | _ -> YObject Map.empty
-                  ) (YObject Map.empty)
-     (k, inner) |> mapFromPair |> YObject
+    if readLength = currentInd then Reply(())
+    else
+      stream.Skip(-readLength) |> ignore // re position the stream back to original
+      stream.StateTag <- stateTag // reset state tag
+      Reply(Error, NoErrorMessages)
+
+let valueParser = stringParser .>> spaceConsumer |>> (YValue)
+let keyParser = stringParser .>> pchar ':' .>> spaceConsumer
+
+let keyValueParser = (consumeIndentation >>. keyParser) .>>. valueParser .>> restOfLine true |>> (mapFromPair >> YObject)
+
+let recursiveKeyValueOrKeyParser, refRecursiveKeyValueOrKeyParser = createParserForwardedToRef()
+
+let gotoNextObj : Parser<Yaml, YamlState> = 
+  (fun stream -> 
+    stream.UserState <- { stream.UserState with CurrentIndentation = stream.UserState.CurrentIndentation + 2 }
+    Reply(())) 
+  >>. recursiveKeyValueOrKeyParser 
+  .>> (fun stream -> 
+    stream.UserState <- { stream.UserState with CurrentIndentation = stream.UserState.CurrentIndentation - 2 }
+    Reply(())
+  )
+let keyValueOrKeyParser = attempt (consumeIndentation >>. keyParser .>> newline .>>. gotoNextObj |>> (mapFromPair >> YObject)) <|> keyValueParser
+
+do refRecursiveKeyValueOrKeyParser := many keyValueOrKeyParser |>> (fun yobjs -> 
+    List.fold (fun st yobj -> 
+      match st, yobj with
+      | YObject a, YObject b -> YObject (join a b)
+      | _ -> st
+      ) (YObject Map.empty) yobjs
   )
 
-let stopObjectCollectionOrContinue (consumeParser: Parser<unit, YamlState>) (continuationParser: Parser<Yaml, YamlState>) : Parser<Yaml, YamlState> =
-  fun stream ->
-    let consumeReply = consumeParser stream
-    printfn "Status :: %A" consumeReply.Status
-    match consumeReply.Status with
-    | FatalError -> Reply(FatalError, consumeReply.Error)
-      // well here means that consuming indentation didn't get to where it expected to
-      // but it was incorrect, so we need to fall
-    | Error -> 
-      printfn "Well we're going to fall out gracefully now"
-      decreaseIndentation stream |> ignore
-      printfn "New Indentation :: %A" stream.UserState
-      Reply(createEmptyYamlObject())
-    | Ok -> continuationParser stream
-    | _ -> Reply(FatalError, messageError "Had an error stopping object collection or continue")
+let addRange (sb: StringBuilder) range = range |> List.iter (sb.AppendLine >> ignore)
 
-let parseObject : Parser<Yaml, YamlState> =
-  let attemptKey =
-    keyParser .>>. (consumeEndOfLine >>. increaseIndentation >>. yamlObject) |>> (function pair -> YObject (Map.ofList [pair]))
-  let tryKeyValueThenKey = (attempt keyValueParser) <|> attemptKey 
-  // what is happening is it is trying to do the attemptKeyValue and failing - obviously falling out the 
-  // recursion, so need to figure out what to do about attempting objects - seems like consumeIndent may not be detecting or something
-  stopObjectCollectionOrContinue consumeIndentation (fun stream ->
-    let rpl = many tryKeyValueThenKey |>> (fun yobjs ->
-        List.fold (fun yreturn yobj ->
-          match yobj, yreturn with
-          | YObject o, YObject o2 -> YObject (join o o2)
-          | _ -> YObject (Map.empty)
-        ) emptyYObject yobjs
+let rec printYamlObj (indentToPrint: int) (yobj: Yaml) : string =
+  let indentation = String (' ', indentToPrint)
+  let sb = StringBuilder()
+  match yobj with
+  | YObject o ->
+    o 
+    |> Map.toList
+    |> List.map (fun (k, v) -> 
+        let newline = function YObject _ -> "\n" | _ -> ""
+        sprintf "%s%s: %s%s" indentation k (v |> newline) (printYamlObj (indentToPrint + 2) v)
       )
-    printfn "Done trying... exiting parseObject"
-    rpl stream
-  )
-
-let wrapParseObject : Parser<Yaml, YamlState> = 
-  attempt (many (fun stream ->
-    printfn "running base parser :: %c" (stream.Peek())
-    let rtn =  yamlObject stream
-    rtn
-  ) |>> (fun yobjs -> 
-    let rtn =
-      List.fold (fun yreturn yobj ->
-        printfn "got here with %A\n%A" yreturn yobj 
-        match yobj, yreturn with
-        | YObject o, YObject o2 -> YObject (join o o2)
-        | _ -> YObject (Map.empty)
-      ) emptyYObject yobjs
-    printfn "whatup ===== " |> ignore
-    rtn
-  )) .>> eof
-
-do yamlObjectRef := parseObject
-
-let file = wrapParseObject .>> eof
+    |> addRange sb
+    |> ignore
+    sb.ToString()
+  | YArray os ->
+    os 
+    |> List.map (fun yobj -> sprintf "%s- %s" indentation (printYamlObj (indentToPrint + 2) yobj))
+    |> addRange sb
+    |> ignore
+    sb.ToString()
+  | YValue v -> v
 
 let runYaml p s = runParserOnString p YamlState.Default "" s
+let runYamlCustom p s st = runParserOnString p st "" s
 
-runYaml keyObjectParser "a: \n  c:d\n  e:  f\n" |> printfn "%A"
-
-// runYaml ((keyValueParser |>> (fun a -> [a] |> Map.ofList |> YObject) ) <|> (keyParser |>> (fun a -> [a,YObject (Map.empty)] |> Map.ofList |> YObject))) "a: " |> printfn "%A"
+runYamlCustom recursiveKeyValueOrKeyParser "a: \n  b:c\n  d:\n    e:efr\n    fr:br\nf:g\nh:\n  i:j" { YamlState.Default with CurrentIndentation = 0 } 
+|> function Success (s,_,_) -> printYamlObj 0 s | Failure (msg, _ , _) -> msg
+|> printfn "%s"
