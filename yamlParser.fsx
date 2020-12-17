@@ -55,15 +55,9 @@ let keyValueParser = (consumeIndentation >>. keyParser) .>>. valueParser .>> res
 
 let recursiveKeyValueOrKeyParser, refRecursiveKeyValueOrKeyParser = createParserForwardedToRef()
 
-let gotoNextObj : Parser<Yaml, YamlState> = 
-  (fun stream -> 
-    stream.UserState <- { stream.UserState with CurrentIndentation = stream.UserState.CurrentIndentation + 2 }
-    Reply(())) 
-  >>. recursiveKeyValueOrKeyParser 
-  .>> (fun stream -> 
-    stream.UserState <- { stream.UserState with CurrentIndentation = stream.UserState.CurrentIndentation - 2 }
-    Reply(())
-  )
+let changeState inc state = { state with CurrentIndentation = state.CurrentIndentation + inc }
+
+let gotoNextObj : Parser<Yaml, YamlState> = updateUserState (changeState 2) >>. recursiveKeyValueOrKeyParser .>> updateUserState (changeState -2)
 let keyValueOrKeyParser = attempt (consumeIndentation >>. keyParser .>> newline .>>. gotoNextObj |>> (mapFromPair >> YObject)) <|> keyValueParser
 
 do refRecursiveKeyValueOrKeyParser := many keyValueOrKeyParser |>> (fun yobjs -> 
