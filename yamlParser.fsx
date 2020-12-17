@@ -87,7 +87,10 @@ let rec printYamlObj (indentToPrint: int) (yobj: Yaml) : string =
         let newline = function YObject _ -> "\n" | _ -> ""
         sprintf "%s%s: %s%s" indentation k (v |> newline) (printYamlObj (indentToPrint + 2) v)
       )
-    |> addRange sb
+    |> List.reduce (fun a b ->
+        sprintf "%s\n%s" a b
+      )
+    |> fun a -> sb.Append(a)
     |> ignore
     sb.ToString()
   | YArray os ->
